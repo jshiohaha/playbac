@@ -1,0 +1,5 @@
+Pillow==6.0.0
+requests
+boto3
+validators
+goose3
