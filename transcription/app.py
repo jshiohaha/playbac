@@ -11,13 +11,14 @@ from goose3 import Goose
 from validators import url, ValidationFailure
 
 # project imports
-from constants import language_to_voice_map, OUTPUT_BUCKET_NAME, POLLY_ENGINE
+from constants import language_to_voice_map, OUTPUT_BUCKET_NAME, POLLY_ENGINE, ENGLISH_CODE
 from exception import LanguageMappingException
 from gender import Gender
 
 
 s3_client = boto3.client('s3', region_name='us-east-2')
 polly_client = boto3.client('polly', region_name='us-east-2')
+translate_client = boto3.client('translate', region_name='us-east-2')
 
 def clean_lambda_params(data):
     expected_params = ["url", "language", "region", "gender"]
@@ -36,7 +37,7 @@ def get_language_voice_mapping(language, region=None, gender=Gender.FEMALE):
     try:
         language_obj = language_to_voice_map[language]
         voice = random.choice(language_obj[gender])
-        return voice, language_obj["code"] # TODO: figure out this mapping from the map obj above
+        return voice, language_obj["code"], language_obj["translate_code"] # TODO: figure out this mapping from the map obj above
     except Exception as e:
         message = str(e) + "\n\n[EXCEPTION]: No language associated with the following parameters:\nLanguage: {},\nRegion: {},\nGender: {}".format(language, region, gender)
         raise LanguageMappingException(message)
@@ -48,16 +49,22 @@ def process_event(data):
         url(target_url)
     except ValidationFailure as validationFailure: 
         raise Exception("[EXCEPTION]: Invalid URL\n\nValidationFailure ==> {}".format(str(validationFailure)))
-    voice_id, lang_code = get_language_voice_mapping(fnc_params["language"], fnc_params["region"], fnc_params["gender"])
+    voice_id, lang_code, translate_code = get_language_voice_mapping(fnc_params["language"], fnc_params["region"], fnc_params["gender"])
     print("[REQUEST DETAILS] url: {0}, voiceId: {1}, languageCode: {2}".format(target_url, voice_id, lang_code))
 
-    article = Goose().extract(url=target_url)
+    text_to_transcribe = Goose().extract(url=target_url).cleaned_text
+    if translate_code != ENGLISH_CODE:
+        # translate
+        response = translate_client.translate_text(Text=text_to_transcribe, 
+            SourceLanguageCode=ENGLISH_CODE, TargetLanguageCode=translate_code)
+        text_to_transcribe = response["TranslatedText"]
+
     # submit the contents to amazon polly for synthesis task: https://docs.aws.amazon.com/polly/latest/dg/API_StartSpeechSynthesisTask.html
     response = polly_client.start_speech_synthesis_task(
         Engine=POLLY_ENGINE,
         OutputFormat='mp3', # Audio output
         TextType='text',
-        Text=article.cleaned_text, # main content from the webpage
+        Text=text_to_transcribe, # main content from the webpage
         VoiceId=voice_id,
         LanguageCode=lang_code,
         OutputS3BucketName=OUTPUT_BUCKET_NAME, # TODO: Amazon S3 bucket name to which the output file will be saved.
